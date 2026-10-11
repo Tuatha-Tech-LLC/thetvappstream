@@ -63,3 +63,95 @@ test('rewriteManifest preserves EXT-X-ENDLIST tag unchanged', () => {
   const out = rewriteManifest(m3u8, MANIFEST_URL, BASE, SID);
   assert.match(out, /^#EXT-X-ENDLIST\s*$/m);
 });
+
+const { Readable, PassThrough } = require('node:stream');
+const { looksLikeManifest, fetchManifest, createHlsHandlers } = require('../hlsProxy');
+
+test('looksLikeManifest accepts a BOM/whitespace-prefixed #EXTM3U only', () => {
+  assert.ok(looksLikeManifest('#EXTM3U\n#EXTINF:6,\na.ts'));
+  assert.ok(looksLikeManifest('﻿  #EXTM3U'));
+  assert.ok(!looksLikeManifest('<html>403</html>'));
+  assert.ok(!looksLikeManifest(''));
+});
+
+test('fetchManifest rejects error pages and empty #EXTM3U shells', async () => {
+  const http = body => ({ get: async () => ({ status: 200, data: body, request: {} }) });
+  assert.ok(await fetchManifest('u', {}, { http: http('#EXTM3U\n#EXTINF:6,\na.ts') }));
+  assert.ok(
+    await fetchManifest('u', {}, { http: http('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8') }),
+  );
+  assert.strictEqual(await fetchManifest('u', {}, { http: http('#EXTM3U\n') }), null);
+  assert.strictEqual(await fetchManifest('u', {}, { http: http('<html>blocked</html>') }), null);
+  const notFound = { get: async () => ({ status: 404, data: '#EXTM3U\n#EXTINF:6,\na.ts' }) };
+  assert.strictEqual(await fetchManifest('u', {}, { http: notFound }), null);
+});
+
+// Minimal express-like response backed by a writable so pipe() works.
+function fakeRes() {
+  const res = new PassThrough();
+  const chunks = [];
+  res.on('data', c => chunks.push(c));
+  res.statusCode = 200;
+  res.headers = {};
+  res.status = code => ((res.statusCode = code), res);
+  res.type = t => ((res.headers['content-type'] = t), res);
+  res.set = (k, v) => ((res.headers[k.toLowerCase()] = v), res);
+  res.send = body => {
+    res.end(body);
+    return res;
+  };
+  res.body = () =>
+    new Promise(resolve => res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))));
+  return res;
+}
+
+function segmentHandler(upstream) {
+  return createHlsHandlers({
+    lookupHeaders: () => ({ Referer: 'https://embed/' }),
+    baseUrlFor: () => BASE,
+    http: { get: async () => upstream },
+  });
+}
+
+test('segment rewrites a nested manifest served from an extensionless octet-stream url', async () => {
+  const hls = segmentHandler({
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream' },
+    data: Readable.from([Buffer.from('#EXTM3U\n#EXTINF:6,\nseg-1.ts\n')]),
+    request: {},
+  });
+  const res = fakeRes();
+  const done = res.body();
+  await hls.segment(
+    {
+      params: { streamId: SID },
+      query: { u: 'https://cdn.x/playlist/7/load-playlist' },
+      headers: {},
+    },
+    res,
+  );
+  const out = await done;
+  assert.match(out, /^#EXTM3U/);
+  assert.match(out, /\/hlsseg\/daddylive%3A51\?u=https%3A%2F%2Fcdn\.x%2Fplaylist%2F7%2Fseg-1\.ts/);
+});
+
+test('segment streams binary payloads through untouched', async () => {
+  const payload = Buffer.from([0x47, 0x40, 0x00, 0x10, 0xff]);
+  const hls = segmentHandler({
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream' },
+    data: Readable.from([payload.subarray(0, 2), payload.subarray(2)]),
+    request: {},
+  });
+  const res = fakeRes();
+  const chunks = [];
+  res.removeAllListeners('data');
+  res.on('data', c => chunks.push(c));
+  const ended = new Promise(r => res.on('end', r));
+  await hls.segment(
+    { params: { streamId: SID }, query: { u: 'https://cdn.x/a.ts' }, headers: {} },
+    res,
+  );
+  await ended;
+  assert.deepStrictEqual(Buffer.concat(chunks), payload);
+});

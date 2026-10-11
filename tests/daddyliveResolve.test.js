@@ -93,3 +93,31 @@ test('resolveDaddyStream throws when the embed is missing', async () => {
     /no daddy embed/,
   );
 });
+
+test('resolveDaddyStream uses the plain-GET stream page and skips the headless render', async () => {
+  let rendered = false;
+  const out = await resolveDaddyStream('https://dlhd.pk', '51', {
+    fetchPlain: async () => STREAM_HTML,
+    fetchPage: async () => {
+      rendered = true;
+      return STREAM_HTML;
+    },
+    sniff: async () => ({ url: 'https://cdn.example/mono.m3u8', headers: {} }),
+  });
+  assert.strictEqual(rendered, false);
+  assert.strictEqual(out.url, 'https://cdn.example/mono.m3u8');
+});
+
+test('resolveDaddyStream falls back to the rendered page when the plain GET has no embed', async () => {
+  let rendered = false;
+  const out = await resolveDaddyStream('https://dlhd.pk', '51', {
+    fetchPlain: async () => '<html>js shell</html>',
+    fetchPage: async () => {
+      rendered = true;
+      return STREAM_HTML;
+    },
+    sniff: async () => ({ url: 'https://cdn.example/mono.m3u8', headers: {} }),
+  });
+  assert.strictEqual(rendered, true);
+  assert.strictEqual(out.url, 'https://cdn.example/mono.m3u8');
+});

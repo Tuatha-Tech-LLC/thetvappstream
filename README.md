@@ -19,8 +19,14 @@ Enable providers (in order — first wins same-game event fallback) via the
 `PROVIDERS` env var, e.g. `PROVIDERS=thetvapp,daddylive`.
 
 Events from the same game across providers are deduped to one channel by a
-canonical identity (normalized team set + league + date), with the other
-provider kept as a fallback source.
+canonical identity (normalized team set + league + date), falling back to a
+looser same-game match (team nickname/suffix variants, starts within 2.5h) so
+"Detroit Tigers" and "Tigers" land on one channel. The other provider — and any
+backup feeds a source lists for the game — is kept as an ordered fallback.
+
+On play, each candidate stream's manifest is fetched and checked (200,
+`#EXTM3U`, has segments/variants) before it's served; a dead or empty feed
+falls through to the next source instead of producing a black channel.
 
 \* DaddyLive's schedule JSON carries an unreliable date header; its events are
 interpreted as "today" and stale ones dropped. If they prove noisy, set
@@ -48,6 +54,7 @@ interpreted as "today" and stale ones dropped. If they prove noisy, set
 | `EVENT_REFRESH_MS`     | `1800000` (30 min)    | How often to re-scrape event listings.                                                                                                        |
 | `DLHD_URLS`            | `https://dlhd.pk`     | Comma-separated mirror list for DaddyLive.                                                                                                    |
 | `DLHD_ENABLE_EVENTS`   | `true`                | DaddyLive: surface (best-effort) schedule events. Set `false` for channels only.                                                              |
+| `STREAM_CACHE_MS`      | `600000` (10 min)     | Reuse a validated stream URL per channel for this long (re-checked on every use). `0` disables.                                               |
 
 ## Running with Docker
 

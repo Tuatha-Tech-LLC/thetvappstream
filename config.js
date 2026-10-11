@@ -11,6 +11,11 @@ function parsePositiveInt(v, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function parseNonNegativeInt(v, fallback) {
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 module.exports = {
   PORT: process.env.PORT || 5000,
   // Ordered list of enabled stream sources (see providers/index.js registry).
@@ -61,4 +66,8 @@ module.exports = {
   // event entries are slot ids reused across the day, so frequent refresh
   // matters more here than for the TV channel cache.
   EVENT_REFRESH_MS: parsePositiveInt(process.env.EVENT_REFRESH_MS, 30 * 60 * 1000),
+  // How long a resolved+validated stream URL is reused for a channel before the
+  // provider is asked again. The cached URL is re-checked on every use, so an
+  // expired token just costs one failed manifest fetch. 0 disables the cache.
+  STREAM_CACHE_MS: parseNonNegativeInt(process.env.STREAM_CACHE_MS, 10 * 60 * 1000),
 };

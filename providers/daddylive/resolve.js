@@ -1,3 +1,4 @@
+const axios = require('axios');
 const cheerio = require('cheerio');
 const browser = require('../../browser');
 
@@ -34,15 +35,43 @@ function streamHeaders(sniffHeaders, embedOrigin) {
   return out;
 }
 
+async function plainGet(url, referer) {
+  const r = await axios.get(url, {
+    headers: { 'User-Agent': browser.DEFAULT_UA, Referer: referer, Accept: '*/*' },
+    timeout: 15000,
+    maxRedirects: 5,
+    validateStatus: () => true,
+    responseType: 'text',
+    transformResponse: x => x,
+  });
+  return r.status === 200 ? String(r.data || '') : '';
+}
+
 // Resolve a dlhd channel id to a playable HLS manifest URL + the headers needed
-// to fetch it. `deps` is injectable for testing: { fetchPage, sniff }.
+// to fetch it. `deps` is injectable for testing: { fetchPlain, fetchPage, sniff }.
 async function resolveDaddyStream(base, id, deps = {}) {
   const fetchPage = deps.fetchPage || (u => browser.fetchRendered(u, { referer: `${base}/` }));
+  // The stream page usually carries the embed iframe in its static HTML, so try
+  // a plain GET before paying for a headless render. Tests that inject only
+  // fetchPage get no plain hop (no network in the suite).
+  const fetchPlain =
+    deps.fetchPlain !== undefined
+      ? deps.fetchPlain
+      : deps.fetchPage
+        ? null
+        : u => plainGet(u, `${base}/`);
   const sniff = deps.sniff || ((u, opts) => browser.sniffStream(u, opts));
 
   const streamUrl = `${base}/stream/stream-${id}.php`;
-  const html = await fetchPage(streamUrl);
-  const embed = extractEmbedUrl(html);
+  let embed = null;
+  if (fetchPlain) {
+    try {
+      embed = extractEmbedUrl(await fetchPlain(streamUrl));
+    } catch {
+      embed = null;
+    }
+  }
+  if (!embed) embed = extractEmbedUrl(await fetchPage(streamUrl));
   if (!embed) throw new Error(`daddylive: no daddy embed for id=${id}`);
 
   const embedOrigin = new URL(embed).origin;

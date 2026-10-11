@@ -2,7 +2,7 @@ const express = require('express');
 const { baseUrlFor } = require('./baseUrl');
 const { PORT, PUBLIC_BASE_URL, EVENT_REFRESH_MS } = require('./config');
 const { createAggregator } = require('./providers');
-const { createHlsHandlers } = require('./hlsProxy');
+const { createHlsHandlers, fetchManifest } = require('./hlsProxy');
 const { buildSplitLogo, renderEventArt } = require('./logoCompositor');
 
 const app = express();
@@ -41,7 +41,12 @@ app.get('/epg.xml', (_req, res) => {
 
 app.get('/channel/:id', async (req, res) => {
   try {
-    const { url, headers } = await aggregator.resolveStream(req.params.id);
+    // Validate each candidate by fetching its manifest with the headers it
+    // needs, so a source that resolves to a dead/empty playlist falls through
+    // to the next one. The fetched manifest is reused below.
+    const { url, headers, check } = await aggregator.resolveStream(req.params.id, {
+      validate: s => fetchManifest(s.url, s.headers).catch(() => null),
+    });
     if (headers && Object.keys(headers).length > 0) {
       // Header-locked stream: remux through the proxy so segments carry the
       // required Referer/Origin (a redirect can't).
@@ -51,6 +56,7 @@ app.get('/channel/:id', async (req, res) => {
         url,
         headers,
         base: baseUrlFor(req, PUBLIC_BASE_URL),
+        manifest: check,
       });
     } else {
       res.redirect(url);
