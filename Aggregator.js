@@ -30,6 +30,16 @@ function eventArtUrl(base, ev, fmt) {
   return `${base}/logo/event?${q.join('&')}`;
 }
 
+// listLinearChannels() returns either the legacy { displayName: ref } map or an
+// array of { name, ref, logo?, group? } (playlist-backed sources, which carry
+// their own artwork/groups and can list two channels under one name).
+function normalizeLinear(channels) {
+  if (Array.isArray(channels)) {
+    return channels.filter(c => c && c.name && c.ref != null && c.ref !== '');
+  }
+  return Object.entries(channels || {}).map(([name, ref]) => ({ name, ref }));
+}
+
 // Fans the M3U/EPG/stream surface out across N providers:
 //   - linear channels are namespaced per provider (id `${provider}:${ref}`)
 //   - events are deduped by cross-provider canonical identity, keeping an
@@ -160,14 +170,14 @@ class Aggregator {
       } catch (e) {
         console.error(`[${p.name}] listLinearChannels: ${e.message}`);
       }
-      for (const [name, ref] of Object.entries(channels || {})) {
-        const streamId = `${p.name}:${ref}`;
-        index.set(streamId, [{ providerName: p.name, ref }]);
+      for (const ch of normalizeLinear(channels)) {
+        const streamId = `${p.name}:${ch.ref}`;
+        index.set(streamId, [{ providerName: p.name, ref: ch.ref }]);
         linearEntries.push({
           tvgId: streamId,
-          name,
-          group: 'Live TV',
-          logo: logoByName.get(name) || '',
+          name: ch.name,
+          group: ch.group || 'Live TV',
+          logo: ch.logo || logoByName.get(ch.name) || '',
           streamId,
         });
       }

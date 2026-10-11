@@ -1,6 +1,6 @@
 // Base contract every stream source implements. The Aggregator talks ONLY to
-// this surface, so adding a source (streameast, methstreams, ...) is a new
-// subclass with zero changes to M3U/EPG assembly or the HTTP layer.
+// this surface, so adding a source is a new subclass with zero changes to
+// M3U/EPG assembly or the HTTP layer.
 //
 // streamRef is opaque to the aggregator: whatever a provider puts on an event /
 // channel here is handed straight back to resolveStream(). resolveStream may
@@ -17,8 +17,9 @@ class Provider {
   // Re-scrape time-sensitive event listings. No-op for sources without events.
   async refreshEvents() {}
 
-  // Persistent 24/7 channels as { displayName: streamRef }. Event-only sources
-  // (streameast, methstreams) return {}.
+  // Persistent 24/7 channels as { displayName: streamRef }, or an array of
+  // { name, ref, logo?, group? } when the source supplies its own artwork and
+  // groups. Event-only sources return {}.
   async listLinearChannels() {
     return {};
   }
@@ -32,7 +33,9 @@ class Provider {
   }
 
   // EPG for THIS provider's LINEAR channels, pre-merge:
-  //   { items: [{ name, chid, logo }], programmesByChid: { chid: [{ title, startTime, endTime }] } }
+  //   { items: [{ name, chid, logo }],
+  //     programmesByChid: { chid: [{ title, startTime, endTime,
+  //                                  episodeTitle?, desc?, categories?, icon? }] } }
   // Event programmes are synthesized by the Aggregator from listEvents(), so
   // they must NOT be included here.
   async getEpgData() {

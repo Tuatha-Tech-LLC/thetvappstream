@@ -2,7 +2,7 @@ const express = require('express');
 const { baseUrlFor } = require('./baseUrl');
 const { PORT, PUBLIC_BASE_URL, EVENT_REFRESH_MS } = require('./config');
 const { createAggregator } = require('./providers');
-const { createHlsHandlers, fetchManifest } = require('./hlsProxy');
+const { createHlsHandlers, probeStream } = require('./hlsProxy');
 const { buildSplitLogo, renderEventArt } = require('./logoCompositor');
 
 const app = express();
@@ -41,13 +41,17 @@ app.get('/epg.xml', (_req, res) => {
 
 app.get('/channel/:id', async (req, res) => {
   try {
-    // Validate each candidate by fetching its manifest with the headers it
-    // needs, so a source that resolves to a dead/empty playlist falls through
-    // to the next one. The fetched manifest is reused below.
+    // Validate each candidate by probing it with the headers it needs, so a
+    // source that resolves to a dead/empty stream falls through to the next
+    // one. A fetched HLS manifest is reused below.
     const { url, headers, check } = await aggregator.resolveStream(req.params.id, {
-      validate: s => fetchManifest(s.url, s.headers).catch(() => null),
+      validate: s => probeStream(s.url, s.headers).catch(() => null),
     });
-    if (headers && Object.keys(headers).length > 0) {
+    const needsHeaders = headers && Object.keys(headers).length > 0;
+    if (needsHeaders && check && check.kind === 'direct') {
+      // Header-locked non-HLS feed (continuous MPEG-TS): relay the body.
+      await hls.passthrough(req, res, { url, headers });
+    } else if (needsHeaders) {
       // Header-locked stream: remux through the proxy so segments carry the
       // required Referer/Origin (a redirect can't).
       streamHeaders.set(req.params.id, headers);
@@ -56,7 +60,7 @@ app.get('/channel/:id', async (req, res) => {
         url,
         headers,
         base: baseUrlFor(req, PUBLIC_BASE_URL),
-        manifest: check,
+        manifest: check && check.kind === 'hls' ? check : null,
       });
     } else {
       res.redirect(url);

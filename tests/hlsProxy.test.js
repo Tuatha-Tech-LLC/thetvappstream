@@ -75,14 +75,23 @@ test('looksLikeManifest accepts a BOM/whitespace-prefixed #EXTM3U only', () => {
 });
 
 test('fetchManifest rejects error pages and empty #EXTM3U shells', async () => {
-  const http = body => ({ get: async () => ({ status: 200, data: body, request: {} }) });
+  const http = body => ({
+    get: async () => ({
+      status: 200,
+      headers: {},
+      data: Readable.from([Buffer.from(body)]),
+      request: {},
+    }),
+  });
   assert.ok(await fetchManifest('u', {}, { http: http('#EXTM3U\n#EXTINF:6,\na.ts') }));
   assert.ok(
     await fetchManifest('u', {}, { http: http('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8') }),
   );
   assert.strictEqual(await fetchManifest('u', {}, { http: http('#EXTM3U\n') }), null);
   assert.strictEqual(await fetchManifest('u', {}, { http: http('<html>blocked</html>') }), null);
-  const notFound = { get: async () => ({ status: 404, data: '#EXTM3U\n#EXTINF:6,\na.ts' }) };
+  const notFound = {
+    get: async () => ({ status: 404, headers: {}, data: Readable.from([Buffer.from('#EXTM3U')]) }),
+  };
   assert.strictEqual(await fetchManifest('u', {}, { http: notFound }), null);
 });
 
@@ -154,4 +163,67 @@ test('segment streams binary payloads through untouched', async () => {
   );
   await ended;
   assert.deepStrictEqual(Buffer.concat(chunks), payload);
+});
+
+const { probeStream } = require('../hlsProxy');
+
+function streamHttp(status, ctype, chunks) {
+  const body = Readable.from(chunks.map(c => Buffer.from(c)));
+  return {
+    body,
+    http: {
+      get: async () => ({ status, headers: { 'content-type': ctype }, data: body, request: {} }),
+    },
+  };
+}
+
+test('probeStream classifies HLS, direct media, and error pages', async () => {
+  const hlsP = await probeStream(
+    'u',
+    {},
+    streamHttp(200, 'text/plain', ['#EXTM3U\n#EXTINF:6,\na.ts']),
+  );
+  assert.strictEqual(hlsP.kind, 'hls');
+
+  const ts = streamHttp(200, 'video/mp2t', [Buffer.from([0x47, 0x40]), Buffer.from([0x00])]);
+  const direct = await probeStream('u', {}, ts);
+  assert.deepStrictEqual(direct, { kind: 'direct', contentType: 'video/mp2t', finalUrl: 'u' });
+  assert.ok(ts.body.destroyed, 'a continuous feed is not downloaded past its first chunk');
+
+  assert.strictEqual(
+    await probeStream('u', {}, streamHttp(200, 'text/html', ['<html>no</html>'])),
+    null,
+  );
+  assert.strictEqual(await probeStream('u', {}, streamHttp(403, 'video/mp2t', ['x'])), null);
+});
+
+test('passthrough relays a header-locked non-HLS body with its headers', async () => {
+  let sent;
+  const hls = createHlsHandlers({
+    lookupHeaders: () => null,
+    baseUrlFor: () => BASE,
+    http: {
+      get: async (_url, opts) => {
+        sent = opts.headers;
+        return {
+          status: 200,
+          headers: { 'content-type': 'video/mp2t' },
+          data: Readable.from([Buffer.from([0x47, 1]), Buffer.from([2])]),
+        };
+      },
+    },
+  });
+  const res = fakeRes();
+  const chunks = [];
+  res.removeAllListeners('data');
+  res.on('data', c => chunks.push(c));
+  const ended = new Promise(r => res.on('end', r));
+  await hls.passthrough({ headers: {} }, res, {
+    url: 'https://c/x.ts',
+    headers: { Referer: 'https://r/' },
+  });
+  await ended;
+  assert.deepStrictEqual(sent, { Referer: 'https://r/' });
+  assert.strictEqual(res.headers['content-type'], 'video/mp2t');
+  assert.deepStrictEqual(Buffer.concat(chunks), Buffer.from([0x47, 1, 2]));
 });

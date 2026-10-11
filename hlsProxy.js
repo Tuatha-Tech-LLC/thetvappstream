@@ -46,34 +46,6 @@ function looksLikeManifest(text) {
 // sniffed so a disguised manifest is still rewritten.
 const NEVER_MANIFEST_RE = /^(video|audio|image)\//i;
 
-function bodyText(data) {
-  if (typeof data === 'string') return data;
-  if (Buffer.isBuffer(data)) return data.toString('utf8');
-  return String(data ?? '');
-}
-
-// Fetch a manifest and decide whether it is playable: 200, starts with
-// #EXTM3U, and carries at least one segment or variant. Dead pirate feeds
-// often answer 200 with an empty "#EXTM3U" shell or an HTML error page, and
-// handing those to the player just produces a silent black channel instead of
-// letting the aggregator fall through to the next source.
-//
-// Returns { text, finalUrl } when playable, otherwise null.
-async function fetchManifest(url, headers, { http = axios, timeout = 15000 } = {}) {
-  const r = await http.get(url, {
-    headers: headers || {},
-    responseType: 'text',
-    timeout,
-    maxRedirects: 5,
-    validateStatus: () => true,
-    transformResponse: x => x,
-  });
-  const text = bodyText(r.data);
-  if (r.status !== 200 || !looksLikeManifest(text)) return null;
-  if (!/#EXTINF|#EXT-X-STREAM-INF/.test(text)) return null;
-  return { text, finalUrl: r.request?.res?.responseUrl || url };
-}
-
 // Resolve with the first chunk of a readable (or null at EOF) and leave the
 // stream paused so the caller can decide between buffering and piping.
 function peekFirstChunk(stream) {
@@ -105,10 +77,77 @@ function peekFirstChunk(stream) {
 // Read the rest of a stream into one buffer. Async iteration (rather than an
 // 'end' listener) also terminates cleanly when a short body already emitted
 // 'end' while it sat paused after peekFirstChunk.
-async function collect(stream, first) {
+async function collect(stream, first, maxBytes = Infinity) {
   const chunks = first ? [first] : [];
-  for await (const c of stream) chunks.push(c);
+  let size = first ? first.length : 0;
+  for await (const c of stream) {
+    chunks.push(c);
+    size += c.length;
+    if (size > maxBytes) {
+      stream.destroy();
+      throw new Error(`body exceeds ${maxBytes} bytes`);
+    }
+  }
   return Buffer.concat(chunks);
+}
+
+const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
+const PEEK_TIMEOUT_MS = 15000;
+
+// Probe a stream URL with the headers it needs and classify it:
+//   { kind: 'hls', text, finalUrl }    a playlist with segments/variants
+//   { kind: 'direct', contentType, finalUrl }   a non-HLS media body (an
+//                                       endless MPEG-TS feed, a progressive file)
+//   null                                not playable
+// Only the first chunk of a non-HLS body is read, so probing a continuous TS
+// stream doesn't download it. Dead feeds often answer 200 with an empty
+// "#EXTM3U" shell or an HTML error page; both come back null so the aggregator
+// can fall through to the next source instead of serving a black channel.
+async function probeStream(url, headers, { http = axios, timeout = 15000 } = {}) {
+  const r = await http.get(url, {
+    headers: headers || {},
+    responseType: 'stream',
+    timeout,
+    maxRedirects: 5,
+    validateStatus: () => true,
+  });
+  const body = r.data;
+  const destroy = () => {
+    if (body && typeof body.destroy === 'function') body.destroy();
+  };
+  const finalUrl = r.request?.res?.responseUrl || url;
+  if (r.status !== 200 || !body || typeof body.on !== 'function') {
+    destroy();
+    return null;
+  }
+  const ctype = (r.headers && r.headers['content-type']) || '';
+  let timer;
+  const first = await Promise.race([
+    peekFirstChunk(body),
+    new Promise(resolve => (timer = setTimeout(() => resolve(null), PEEK_TIMEOUT_MS))),
+  ]).finally(() => clearTimeout(timer));
+  if (!first) {
+    destroy();
+    return null;
+  }
+  const head = first.subarray(0, 512).toString('utf8');
+  if (!looksLikeManifest(head)) {
+    destroy();
+    // An error page isn't media, whatever the status code says.
+    if (/text\/html/i.test(ctype) || /^\s*</.test(head)) return null;
+    return { kind: 'direct', contentType: ctype, finalUrl };
+  }
+  const buf = await collect(body, first, MAX_MANIFEST_BYTES);
+  const text = buf.toString('utf8');
+  if (!/#EXTINF|#EXT-X-STREAM-INF/.test(text)) return null;
+  return { kind: 'hls', text, finalUrl };
+}
+
+// HLS-only variant of probeStream for sources that are always HLS: returns
+// { text, finalUrl } for a playable playlist, otherwise null.
+async function fetchManifest(url, headers, opts = {}) {
+  const p = await probeStream(url, headers, opts);
+  return p && p.kind === 'hls' ? { text: p.text, finalUrl: p.finalUrl } : null;
 }
 
 // Headers worth relaying on a passthrough segment so players can seek/resume.
@@ -200,7 +239,35 @@ function createHlsHandlers({ lookupHeaders, baseUrlFor, http = axios }) {
     body.pipe(res);
   }
 
-  return { serveManifest, segment };
+  // Non-HLS stream (continuous MPEG-TS, progressive file) that needs request
+  // headers: relay the body as-is, since there are no segment URIs to rewrite.
+  async function passthrough(req, res, { url, headers }) {
+    const reqHeaders = { ...headers };
+    if (req.headers && req.headers.range) {
+      reqHeaders.Range = req.headers.range;
+      reqHeaders['Accept-Encoding'] = 'identity';
+    }
+    const upstream = await http.get(url, {
+      headers: reqHeaders,
+      responseType: 'stream',
+      timeout: 20000,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    });
+    const body = upstream.data;
+    if (upstream.status !== 200 && upstream.status !== 206) {
+      if (body && typeof body.destroy === 'function') body.destroy();
+      res.status(502).send(`upstream stream ${upstream.status}`);
+      return;
+    }
+    res.on('close', () => {
+      if (body && typeof body.destroy === 'function' && !body.destroyed) body.destroy();
+    });
+    relayHeaders(res, upstream, upstream.headers['content-type'] || '');
+    body.pipe(res);
+  }
+
+  return { serveManifest, segment, passthrough };
 }
 
 function relayHeaders(res, upstream, ctype) {
@@ -216,6 +283,7 @@ module.exports = {
   proxyUri,
   isManifest,
   looksLikeManifest,
+  probeStream,
   fetchManifest,
   createHlsHandlers,
 };
