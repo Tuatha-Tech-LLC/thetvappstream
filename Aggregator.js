@@ -1,9 +1,21 @@
 const { buildXmltv } = require('./ChannelManager');
 const { getChannelLogos } = require('./utils');
-const { canonicalKey, canonicalEventId, stripTime } = require('./canonicalName');
+const { canonicalKey, canonicalEventId, stripTime, sameGame } = require('./canonicalName');
 const { pickEventLogo, pickMatchupLogos } = require('./eventLogos');
 const { normalizeLeagueLabel, normalizeEventName, stripLeaguePrefix } = require('./displayName');
-const { PUBLIC_BASE_URL } = require('./config');
+const { PUBLIC_BASE_URL, STREAM_CACHE_MS } = require('./config');
+
+// M3U attributes are double-quoted and the title follows the last comma, so a
+// stray quote or newline in a source-supplied string corrupts the row (and the
+// rows after it, for parsers that don't resync on #EXTINF).
+function m3uAttr(s) {
+  return String(s ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/"/g, "'");
+}
+function m3uTitle(s) {
+  return String(s ?? '').replace(/[\r\n]+/g, ' ');
+}
 
 // Rendered artwork lives behind /logo/event and is addressed by the same
 // display strings that appear in the guide, so one URL covers crest-backed and
@@ -16,6 +28,16 @@ function eventArtUrl(base, ev, fmt) {
   ];
   if (ev.startSec) q.push(`t=${ev.startSec}`);
   return `${base}/logo/event?${q.join('&')}`;
+}
+
+// listLinearChannels() returns either the legacy { displayName: ref } map or an
+// array of { name, ref, logo?, group? } (playlist-backed sources, which carry
+// their own artwork/groups and can list two channels under one name).
+function normalizeLinear(channels) {
+  if (Array.isArray(channels)) {
+    return channels.filter(c => c && c.name && c.ref != null && c.ref !== '');
+  }
+  return Object.entries(channels || {}).map(([name, ref]) => ({ name, ref }));
 }
 
 // Fans the M3U/EPG/stream surface out across N providers:
@@ -34,6 +56,12 @@ class Aggregator {
     this.providers = providers || [];
     this._providerByName = new Map(this.providers.map(p => [p.name, p]));
     this.streamIndex = new Map(); // publicId -> [{ providerName, ref }]
+    // publicId -> { stream, sourceKey, expires }. Players re-request the entry
+    // URL on reconnect (and on every reload when the upstream entry is a media
+    // playlist), so without this each poll re-ran the full resolve — for
+    // DaddyLive that's a headless-browser session per request.
+    this._resolved = new Map();
+    this.streamCacheMs = STREAM_CACHE_MS;
     this.epgXml = null;
     this.epgLastRefresh = 0;
     this.epgRefreshing = null;
@@ -78,7 +106,19 @@ class Aggregator {
         const name = stripLeaguePrefix(normalizeEventName(ev.name), league);
         const normalized = { ...ev, league, name };
         const key = canonicalKey(normalized);
+        // Exact identity first; then the looser same-game test so a source that
+        // spells a team differently, or rounds the start across a UTC midnight,
+        // lands as a fallback on the existing channel instead of a duplicate.
         let bucket = byKey.get(key);
+        if (!bucket) {
+          for (const b of byKey.values()) {
+            if (sameGame(b, normalized)) {
+              bucket = b;
+              break;
+            }
+          }
+          if (bucket) byKey.set(key, bucket);
+        }
         if (!bucket) {
           const matchup = pickMatchupLogos({ league, name });
           bucket = {
@@ -95,10 +135,20 @@ class Aggregator {
           };
           byKey.set(key, bucket);
         }
-        bucket.sources.push({ providerName: p.name, ref: ev.streamRef });
+        // A source may carry alternate feeds for the same game (dlhd lists
+        // several channels per event); queue them right behind the primary so a
+        // dead feed falls through to the provider's next one before the next
+        // provider.
+        const refs = [ev.streamRef, ...(Array.isArray(ev.altStreamRefs) ? ev.altStreamRefs : [])];
+        for (const ref of refs) {
+          if (ref == null || ref === '') continue;
+          const dup = bucket.sources.some(s => s.providerName === p.name && s.ref === ref);
+          if (!dup) bucket.sources.push({ providerName: p.name, ref });
+        }
       }
     }
-    return [...byKey.values()].sort(
+    // byKey can alias one bucket under several keys after a fuzzy match.
+    return [...new Set(byKey.values())].sort(
       (a, b) => (a.startSec || 0) - (b.startSec || 0) || a.name.localeCompare(b.name),
     );
   }
@@ -120,14 +170,14 @@ class Aggregator {
       } catch (e) {
         console.error(`[${p.name}] listLinearChannels: ${e.message}`);
       }
-      for (const [name, ref] of Object.entries(channels || {})) {
-        const streamId = `${p.name}:${ref}`;
-        index.set(streamId, [{ providerName: p.name, ref }]);
+      for (const ch of normalizeLinear(channels)) {
+        const streamId = `${p.name}:${ch.ref}`;
+        index.set(streamId, [{ providerName: p.name, ref: ch.ref }]);
         linearEntries.push({
           tvgId: streamId,
-          name,
-          group: 'Live TV',
-          logo: logoByName.get(name) || '',
+          name: ch.name,
+          group: ch.group || 'Live TV',
+          logo: ch.logo || logoByName.get(ch.name) || '',
           streamId,
         });
       }
@@ -160,7 +210,7 @@ class Aggregator {
     for (const e of [...linearEntries, ...eventEntries]) {
       chno++;
       m3u +=
-        `\n#EXTINF:-1 tvg-id="${e.tvgId}" tvg-chno="${chno}" tvg-logo="${e.logo}" group-title="${e.group}", ${e.name}` +
+        `\n#EXTINF:-1 tvg-id="${m3uAttr(e.tvgId)}" tvg-chno="${chno}" tvg-logo="${m3uAttr(e.logo)}" group-title="${m3uAttr(e.group)}", ${m3uTitle(e.name)}` +
         `\n${base}/channel/${encodeURIComponent(e.streamId)}`;
     }
     return m3u;
@@ -229,22 +279,60 @@ class Aggregator {
     return this.epgXml;
   }
 
-  async resolveStream(publicId) {
+  // Resolve a public id to a playable stream, trying each source in order.
+  //
+  // `validate(stream)` (optional) is called on every candidate and must return
+  // a truthy value only when the stream actually plays — app.js passes a
+  // manifest fetch, so a provider that hands back a dead or geo-blocked URL
+  // falls through to the next source instead of ending the request. Whatever
+  // validate returns is passed back as `check` so the caller can reuse it
+  // (e.g. the manifest body it already downloaded).
+  //
+  // A validated stream is cached per id; the cached URL is re-validated on use,
+  // so an expired token costs one failed check and a fresh resolve.
+  async resolveStream(publicId, { validate } = {}) {
     const sources = this.streamIndex.get(publicId);
     if (!sources || sources.length === 0) throw new Error(`unknown stream id: ${publicId}`);
+
+    const cached = this._resolved.get(publicId);
+    if (cached && cached.expires > Date.now()) {
+      if (!validate) return cached.stream;
+      const check = await Promise.resolve(validate(cached.stream)).catch(() => null);
+      if (check) return { ...cached.stream, check };
+      this._resolved.delete(publicId);
+    }
+
     let lastErr;
     for (const { providerName, ref } of sources) {
       const provider = this._providerByName.get(providerName);
       if (!provider) continue;
       try {
         const res = await provider.resolveStream(ref);
-        if (res && res.url) return res;
+        if (!res || !res.url) continue;
+        let check;
+        if (validate) {
+          check = await validate(res);
+          if (!check) {
+            lastErr = new Error(`${providerName}:${ref} resolved but did not validate`);
+            console.error(`[${providerName}] resolveStream(${ref}): stream did not validate`);
+            continue;
+          }
+        }
+        if (this.streamCacheMs > 0) {
+          this._resolved.set(publicId, { stream: res, expires: Date.now() + this.streamCacheMs });
+        }
+        return check === undefined ? res : { ...res, check };
       } catch (e) {
         lastErr = e;
         console.error(`[${providerName}] resolveStream(${ref}): ${e.message}`);
       }
     }
     throw lastErr || new Error(`no source resolved for ${publicId}`);
+  }
+
+  // Drop a cached resolution (e.g. after the upstream starts failing mid-play).
+  invalidateStream(publicId) {
+    this._resolved.delete(publicId);
   }
 }
 

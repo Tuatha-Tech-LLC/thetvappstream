@@ -286,3 +286,120 @@ test('the M3U channel name also loses the duplicated league', async () => {
   assert.strictEqual(eventEntries[0].name, 'Pafos vs Salzburg @ May 22 7:10 PM');
   assert.strictEqual(eventEntries[0].group, 'Europe - UEFA Europa League');
 });
+
+test('the same game spelled differently across providers dedupes to one channel', async () => {
+  const a = new FakeProvider('thetvapp', {
+    events: [gameEvent('Detroit Tigers vs Cleveland Guardians @ May 22 7:10 PM', 'tva')],
+  });
+  // Nickname-only spelling, start rounded 5 min and pushed past UTC midnight.
+  const b = new FakeProvider('daddylive', {
+    events: [
+      {
+        league: 'MLB',
+        name: 'Guardians vs Tigers @ May 22 7:15 PM',
+        startSec: Date.parse('2026-05-23T00:15:00Z') / 1000,
+        endSec: END,
+        streamRef: '742',
+      },
+    ],
+  });
+  const agg = new Aggregator([a, b]);
+  const { eventEntries } = await agg.listM3uEntries();
+  assert.strictEqual(eventEntries.length, 1);
+  // The channel keeps the first provider's identity and name.
+  assert.strictEqual(
+    eventEntries[0].name,
+    'Detroit Tigers vs Cleveland Guardians @ May 22 7:10 PM',
+  );
+  assert.deepStrictEqual(
+    agg.streamIndex.get(eventEntries[0].streamId).map(s => `${s.providerName}:${s.ref}`),
+    ['thetvapp:tva', 'daddylive:742'],
+  );
+});
+
+test('a doubleheader nightcap stays its own channel', async () => {
+  const p = new FakeProvider('thetvapp', {
+    events: [
+      gameEvent('Detroit Tigers vs Cleveland Guardians @ May 22 1:10 PM', 'g1'),
+      {
+        ...gameEvent('Detroit Tigers vs Cleveland Guardians @ May 22 6:40 PM', 'g2'),
+        startSec: START + 5.5 * 3600,
+      },
+    ],
+  });
+  const agg = new Aggregator([p]);
+  const { eventEntries } = await agg.listM3uEntries();
+  assert.strictEqual(eventEntries.length, 2);
+});
+
+test('alternate feeds queue behind the primary, before the next provider', async () => {
+  const a = new FakeProvider('daddylive', {
+    events: [
+      { ...gameEvent('Twins vs Red Sox @ May 22 7:10 PM', '742'), altStreamRefs: ['999', '742'] },
+    ],
+    failRefs: ['742'],
+  });
+  const b = new FakeProvider('thetvapp', {
+    events: [gameEvent('Twins vs Red Sox @ May 22 7:10 PM', 'tva')],
+  });
+  const agg = new Aggregator([a, b]);
+  const { eventEntries } = await agg.listM3uEntries();
+  const id = eventEntries[0].streamId;
+  assert.deepStrictEqual(
+    agg.streamIndex.get(id).map(s => `${s.providerName}:${s.ref}`),
+    ['daddylive:742', 'daddylive:999', 'thetvapp:tva'], // duplicate 742 dropped
+  );
+  const { url } = await agg.resolveStream(id);
+  assert.strictEqual(url, 'http://stream/daddylive/999');
+});
+
+test('resolveStream skips a source whose stream fails validation', async () => {
+  const a = new FakeProvider('thetvapp', {
+    events: [gameEvent('Twins vs Red Sox @ May 22 7:10 PM', 'tva')],
+  });
+  const b = new FakeProvider('daddylive', {
+    events: [gameEvent('Twins vs Red Sox @ May 22 7:10 PM', '742')],
+  });
+  const agg = new Aggregator([a, b]);
+  const { eventEntries } = await agg.listM3uEntries();
+  const out = await agg.resolveStream(eventEntries[0].streamId, {
+    validate: s => (s.url.includes('daddylive') ? { text: '#EXTM3U' } : null),
+  });
+  assert.strictEqual(out.url, 'http://stream/daddylive/742');
+  assert.deepStrictEqual(out.check, { text: '#EXTM3U' });
+});
+
+test('a validated stream is cached and re-validated instead of re-resolved', async () => {
+  const p = new FakeProvider('thetvapp', { linear: { CNN: '101' } });
+  const agg = new Aggregator([p]);
+  await agg.listM3uEntries();
+  let healthy = true;
+  const validate = () => (healthy ? { ok: true } : null);
+
+  await agg.resolveStream('thetvapp:101', { validate });
+  await agg.resolveStream('thetvapp:101', { validate });
+  assert.deepStrictEqual(p.resolved, ['101'], 'second request served from cache');
+
+  // Cached URL goes bad -> one fresh resolve.
+  healthy = false;
+  await assert.rejects(() => agg.resolveStream('thetvapp:101', { validate }));
+  assert.deepStrictEqual(p.resolved, ['101', '101']);
+});
+
+test('quotes and newlines in source strings cannot break M3U rows', async () => {
+  const p = new FakeProvider('thetvapp', {
+    events: [
+      {
+        league: 'Big "Quoted" League',
+        name: 'A vs B\n#EXTINF:-1 injected @ May 22 7:10 PM',
+        startSec: START,
+        endSec: END,
+        streamRef: 'x',
+      },
+    ],
+  });
+  const agg = new Aggregator([p]);
+  const m3u = await agg.getM3u('https://x');
+  assert.match(m3u, /group-title="Big 'Quoted' League"/);
+  assert.strictEqual(m3u.split('\n').filter(l => l.startsWith('#EXTINF')).length, 1);
+});

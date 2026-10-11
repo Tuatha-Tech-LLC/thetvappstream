@@ -43,6 +43,11 @@ test('isEndedBadge flags only finished games', () => {
   assert.ok(isEndedBadge('Postponed'));
   assert.ok(!isEndedBadge('In Progress'));
   assert.ok(!isEndedBadge('2 hours from now'));
+  // A weather delay is a live game that resumes — it must not drop the channel.
+  assert.ok(!isEndedBadge('Delayed'));
+  assert.ok(!isEndedBadge('Rain Delay'));
+  assert.ok(isEndedBadge('FT'));
+  assert.ok(isEndedBadge('Abandoned'));
 });
 
 const WATCH = `

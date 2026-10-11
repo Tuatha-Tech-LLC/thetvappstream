@@ -39,7 +39,9 @@ const CHANGE_STREAM_RE = /changeStream\((\d+)\)/g;
 const PLAYLIST_RE =
   /["']((?:https?:)?(?:\/\/[^"']+?)?\/playlist\/\d+\/load-playlist[^"']*|(?:https?:)?\/\/[^"']+?\.m3u8[^"']*)["']/i;
 
-const ENDED_RE = /\b(final|ended|full[\s-]?time|\bft\b|postponed|cancell?ed|delayed)\b/i;
+// "Delayed" is deliberately absent: a rain/weather delay is still a live game
+// that resumes, and dropping it lost the channel mid-broadcast.
+const ENDED_RE = /\b(final|ended|full[\s-]?time|ft|postponed|cancell?ed|abandoned)\b/i;
 
 // Each league page is an <ol class="list-group"> of
 //   <a class="list-group-item" href="/tv-live/<league>/<matchup>/<id>">

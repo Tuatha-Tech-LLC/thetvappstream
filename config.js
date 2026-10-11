@@ -11,6 +11,11 @@ function parsePositiveInt(v, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function parseNonNegativeInt(v, fallback) {
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 module.exports = {
   PORT: process.env.PORT || 5000,
   // Ordered list of enabled stream sources (see providers/index.js registry).
@@ -18,7 +23,8 @@ module.exports = {
   PROVIDERS: (process.env.PROVIDERS || 'thetvapp')
     .split(',')
     .map(s => s.trim())
-    .filter(Boolean),
+    // PROVIDERS=none runs only the M3U_SOURCES feeds.
+    .filter(s => s && s.toLowerCase() !== 'none'),
   TV_URL: process.env.TV_URL || 'https://thetvapp.to',
   // Ordered mirror list for the thetvapp source. The original thetvapp.to backend
   // was taken down (June 2026); the app relocated to the-tv.app (same brand, new
@@ -61,4 +67,13 @@ module.exports = {
   // event entries are slot ids reused across the day, so frequent refresh
   // matters more here than for the TV channel cache.
   EVENT_REFRESH_MS: parsePositiveInt(process.env.EVENT_REFRESH_MS, 30 * 60 * 1000),
+  // How long a resolved+validated stream URL is reused for a channel before the
+  // provider is asked again. The cached URL is re-checked on every use, so an
+  // expired token just costs one failed manifest fetch. 0 disables the cache.
+  // Generic M3U + XMLTV sources (FAST services, public broadcasters, an IPTV
+  // subscription). Each entry becomes its own provider, enabled after PROVIDERS:
+  //   M3U_SOURCES="pluto=https://host/us.m3u8|https://host/us.xml.gz;news=https://..."
+  // or a JSON array of { name, m3u, epg?, group? }. See providers/m3u/parse.js.
+  M3U_SOURCES: process.env.M3U_SOURCES || '',
+  STREAM_CACHE_MS: parseNonNegativeInt(process.env.STREAM_CACHE_MS, 10 * 60 * 1000),
 };

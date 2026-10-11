@@ -294,7 +294,10 @@ function parseSchedule(scheduleJson, opts = {}) {
           name: `${matchup} @ ${formatEventSuffix(startSec, displayTz)}`,
           startSec,
           endSec,
-          streamRef: channels[0], // primary feed; extra feeds are fallback-eligible
+          streamRef: channels[0], // primary feed
+          // Backup feeds, tried in order by the aggregator when the primary is
+          // dead (dlhd commonly lists 2-4 channels per game).
+          altStreamRefs: channels.slice(1),
           channelIds: channels,
         });
       }

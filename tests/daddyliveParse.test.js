@@ -108,6 +108,7 @@ test('parseSchedule keeps current sport events, drops TV Shows and stale ones', 
   assert.match(e.name, /3:00 PM CDT$/);
   assert.strictEqual(e.streamRef, '742');
   assert.deepStrictEqual(e.channelIds, ['742', '999']); // primary + backup feed
+  assert.deepStrictEqual(e.altStreamRefs, ['999']); // backup handed to the aggregator
   assert.strictEqual(e.endSec, e.startSec + 210 * 60); // MLB duration
 });
 
