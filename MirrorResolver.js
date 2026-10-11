@@ -57,6 +57,13 @@ class MirrorResolver {
     }
   }
 
+  // Re-probe from the top of the list so the active mirror returns to the most
+  // preferred live domain once it recovers. Leaves the active mirror alone
+  // when nothing probes live.
+  async preferFirst() {
+    return this.resolve({ start: 0 });
+  }
+
   // Treat the current mirror as failed: probe forward from the NEXT candidate so
   // a dead active domain is skipped before retrying it.
   async rotate() {

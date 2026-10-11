@@ -27,11 +27,27 @@ async function resolveTheTvAppStream(base, watchPath, deps = {}) {
   const validate = deps.validate || ((url, headers) => fetchManifest(url, headers, { http }));
   const watchUrl = /^https?:\/\//.test(watchPath) ? watchPath : `${base}${watchPath}`;
 
-  const wr = await http.get(watchUrl, { headers: { Referer: `${base}/` } });
-  if (wr.status !== 200) throw new Error(`watch page ${wr.status}`);
+  // Failures reaching the watch page are the mirror's fault (dead domain, block
+  // page), so they're tagged for the provider to retry on another mirror.
+  // Everything after this point (embed host, CDN) is shared by all mirrors.
+  let wr;
+  try {
+    wr = await http.get(watchUrl, { headers: { Referer: `${base}/` } });
+  } catch (e) {
+    e.mirrorFailure = true;
+    throw e;
+  }
+  if (wr.status !== 200) {
+    const err = new Error(`watch page ${wr.status}`);
+    err.mirrorFailure = true;
+    throw err;
+  }
   const { streamIds, embedHost } = parseWatchPage(wr.data);
   if (!embedHost || streamIds.length === 0) {
-    throw new Error('no embed host / stream id on watch page');
+    // A 200 with no player is what a parked or redesigned domain serves.
+    const err = new Error('no embed host / stream id on watch page');
+    err.mirrorFailure = true;
+    throw err;
   }
 
   const embedOrigin = `https://${embedHost}`;
