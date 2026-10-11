@@ -12,7 +12,7 @@ adapter — the M3U/EPG assembly, mirror failover, and stream proxy are shared.
 
 | Provider    | Channels | Events        | Stream resolution                         |
 | ----------- | -------- | ------------- | ----------------------------------------- |
-| `thetvapp`  | yes      | yes           | signed HLS, `302` redirect                |
+| `thetvapp`  | no       | yes           | Referer-locked HLS via the proxy          |
 | `daddylive` | yes      | best-effort\* | headless solver + Referer-injecting remux |
 | M3U sources | yes      | no            | as listed; header-locked ones proxied     |
 
@@ -64,6 +64,28 @@ M3U_SOURCES='[{"name":"locals","m3u":"https://example.com/locals.m3u","epg":"htt
 - The playlist is re-read hourly and the guide every 3 hours; if a refresh
   fails, the last good copy keeps being served.
 
+## Mirror failover
+
+`THETVAPP_URLS` and `DLHD_URLS` are ordered lists; the first live entry is
+used. A thetvapp mirror counts as live when one of its league pages lists games.
+
+For thetvapp:
+
+- **Each event refresh** re-checks from the top of the list, so the app moves
+  back to your preferred domain once it recovers.
+- **Mid-refresh**, a connection error or a blocking status (403, 429, 5xx)
+  switches to the next live mirror and retries. A 404 on a single page doesn't,
+  since one league or game page can legitimately be missing.
+- **A mirror that answers but lists no games at all** (a parked domain, or a
+  block page served as 200) is skipped, and the refresh is retried once on the
+  next mirror.
+- **On play**, if the game's page can't be reached on the active mirror, or
+  comes back without a player, the other mirrors are tried in order. Failures
+  further along (the video host itself) aren't retried on other mirrors,
+  because every mirror shares that host.
+
+DaddyLive switches mirrors on connection errors only.
+
 ## Endpoints
 
 | Path            | What it returns                                                                                                                                                                 |
@@ -76,18 +98,18 @@ M3U_SOURCES='[{"name":"locals","m3u":"https://example.com/locals.m3u","epg":"htt
 
 ## Configuration (env vars)
 
-| Var                    | Default               | Notes                                                                                                                                         |
-| ---------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                 | `5000`                | HTTP port the server binds to.                                                                                                                |
-| `PROVIDERS`            | `thetvapp`            | Comma-separated, ordered list of enabled providers (`thetvapp`, `daddylive`). `none` disables them all (M3U sources only).                    |
-| `PUBLIC_BASE_URL`      | _(unset)_             | Base URL emitted in the M3U. When unset, derived from request `Host`/`X-Forwarded-*`. Strongly recommended behind a reverse proxy.            |
-| `THETVAPP_URLS`        | `https://thetvapp.to` | Comma-separated mirror list for thetvapp. Domains rotate; the resolver fails over to the first live one. (`TV_URL` is honored as a fallback.) |
-| `ENABLE_EVENT_STREAMS` | `true`                | thetvapp: scrape per-sport event pages and merge into the M3U + EPG.                                                                          |
-| `EVENT_REFRESH_MS`     | `1800000` (30 min)    | How often to re-scrape event listings.                                                                                                        |
-| `DLHD_URLS`            | `https://dlhd.pk`     | Comma-separated mirror list for DaddyLive.                                                                                                    |
-| `DLHD_ENABLE_EVENTS`   | `true`                | DaddyLive: surface (best-effort) schedule events. Set `false` for channels only.                                                              |
-| `M3U_SOURCES`          | _(unset)_             | Generic M3U + XMLTV feeds, one provider each: `name=<m3u url>\|<xmltv url>;name2=...` or a JSON array. See below.                             |
-| `STREAM_CACHE_MS`      | `600000` (10 min)     | Reuse a validated stream URL per channel for this long (re-checked on every use). `0` disables.                                               |
+| Var                    | Default                                    | Notes                                                                                                                              |
+| ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                 | `5000`                                     | HTTP port the server binds to.                                                                                                     |
+| `PROVIDERS`            | `thetvapp`                                 | Comma-separated, ordered list of enabled providers (`thetvapp`, `daddylive`). `none` disables them all (M3U sources only).         |
+| `PUBLIC_BASE_URL`      | _(unset)_                                  | Base URL emitted in the M3U. When unset, derived from request `Host`/`X-Forwarded-*`. Strongly recommended behind a reverse proxy. |
+| `THETVAPP_URLS`        | `https://the-tv.app,https://thetvapp.link` | Ordered, comma-separated mirror list for thetvapp (first = preferred). See _Mirror failover_. `TV_URL` is not used.                |
+| `ENABLE_EVENT_STREAMS` | `true`                                     | thetvapp: scrape per-sport event pages and merge into the M3U + EPG.                                                               |
+| `EVENT_REFRESH_MS`     | `1800000` (30 min)                         | How often to re-scrape event listings.                                                                                             |
+| `DLHD_URLS`            | `https://dlhd.pk`                          | Comma-separated mirror list for DaddyLive.                                                                                         |
+| `DLHD_ENABLE_EVENTS`   | `true`                                     | DaddyLive: surface (best-effort) schedule events. Set `false` for channels only.                                                   |
+| `M3U_SOURCES`          | _(unset)_                                  | Generic M3U + XMLTV feeds, one provider each: `name=<m3u url>\|<xmltv url>;name2=...` or a JSON array. See below.                  |
+| `STREAM_CACHE_MS`      | `600000` (10 min)                          | Reuse a validated stream URL per channel for this long (re-checked on every use). `0` disables.                                    |
 
 ## Running with Docker
 
