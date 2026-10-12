@@ -59,7 +59,7 @@ test('streamHeaders prefers browser-observed values, defaults to embed origin', 
   );
 });
 
-test('resolveDaddyStream walks stream page -> embed -> sniffed manifest with headers', async () => {
+test('resolveDaddyStream sniffs the embedding stream page, scoped to the player frame', async () => {
   const calls = {};
   const out = await resolveDaddyStream('https://dlhd.pk', '51', {
     fetchPage: async url => {
@@ -75,10 +75,13 @@ test('resolveDaddyStream walks stream page -> embed -> sniffed manifest with hea
     },
   });
   assert.strictEqual(calls.page, 'https://dlhd.pk/stream/stream-51.php');
-  assert.strictEqual(
-    calls.sniff.url,
-    'https://donis.jimpenopisonline.online/premiumtv/daddy3.php?id=51',
+  assert.strictEqual(calls.sniff.url, 'https://dlhd.pk/stream/stream-51.php');
+  assert.ok(
+    calls.sniff.opts.frameMatch.test(
+      'https://donis.jimpenopisonline.online/premiumtv/daddy3.php?id=51',
+    ),
   );
+  assert.ok(!calls.sniff.opts.frameMatch.test('https://ads.example/vast/player.html'));
   assert.strictEqual(out.url, 'https://cdn.newkso.ru/key/premium51/mono.m3u8');
   assert.strictEqual(out.headers.Referer, 'https://donis.jimpenopisonline.online/');
   assert.strictEqual(out.headers.Origin, 'https://donis.jimpenopisonline.online');

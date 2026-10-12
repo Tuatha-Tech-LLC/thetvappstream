@@ -150,13 +150,30 @@ class DaddyLiveProvider extends Provider {
       const r = await this._get(SCHEDULE_PATH);
       if (r && r.status === 200) {
         const json = typeof r.data === 'string' ? JSON.parse(r.data) : r.data;
-        this.eventsCache = parseSchedule(json, parseOpts);
-        console.log(`[daddylive] schedule (json): ${this.eventsCache.length} current event(s)`);
+        const events = parseSchedule(json, parseOpts);
+        if (events.length) {
+          this.eventsCache = events;
+          console.log(`[daddylive] schedule (json): ${events.length} current event(s)`);
+          return;
+        }
       }
     } catch (e) {
       console.error(`[daddylive] schedule fetch: ${e.message}`);
-      this.eventsCache = [];
     }
+
+    this._keepLastGoodEvents();
+  }
+
+  // dlhd always lists games, so zero from both sources means the fetch failed,
+  // not an empty day. Emptying the cache would drop every event channel from the
+  // M3U until the next refresh, and Dispatcharr would 404 every in-progress game.
+  _keepLastGoodEvents(nowSec = Math.floor(Date.now() / 1000)) {
+    const before = this.eventsCache.length;
+    this.eventsCache = this.eventsCache.filter(ev => ev.endSec > nowSec);
+    console.warn(
+      `[daddylive] schedule unavailable; keeping ${this.eventsCache.length} of ${before} ` +
+        'last-good event(s) that have not ended',
+    );
   }
 
   async listEvents() {
