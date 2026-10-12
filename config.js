@@ -50,7 +50,7 @@ module.exports = {
   // shift by the UTC offset between them.
   EVENT_DISPLAY_TZ: process.env.EVENT_DISPLAY_TZ || 'America/Chicago',
   // DaddyLive (dlhd) mirror list + whether to surface its (best-effort) events.
-  DLHD_URLS: (process.env.DLHD_URLS || 'https://dlhd.pk')
+  DLHD_URLS: (process.env.DLHD_URLS || 'https://dlive.sx,https://dlhd.st,https://dlhd.pk')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean),
