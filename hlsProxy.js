@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { unwrapPixelSegment } = require('./segmentUnwrap');
 
 // Header-locked HLS (DaddyLive et al.) can't be recorded via a plain redirect:
 // the CDN requires a Referer/Origin the player can't be told to send. So we
@@ -92,6 +93,7 @@ async function collect(stream, first, maxBytes = Infinity) {
 }
 
 const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
+const MAX_SEGMENT_BYTES = 64 * 1024 * 1024;
 const PEEK_TIMEOUT_MS = 15000;
 
 // Probe a stream URL with the headers it needs and classify it:
@@ -233,6 +235,19 @@ function createHlsHandlers({ lookupHeaders, baseUrlFor, http = axios }) {
       // never see 'end' and leave the response hanging.
       if (body.readableEnded) res.end();
       else body.pipe(res);
+      return;
+    }
+    // A byte range of a pixel-packed segment can't be decoded, so only whole
+    // image bodies are unwrapped.
+    if (/^image\/png/i.test(ctype) && upstream.status === 200) {
+      const buf = await collect(body, null, MAX_SEGMENT_BYTES);
+      const ts = await unwrapPixelSegment(buf);
+      if (ts) {
+        res.status(200).type('video/mp2t').send(ts);
+      } else {
+        relayHeaders(res, upstream, ctype);
+        res.send(buf);
+      }
       return;
     }
     relayHeaders(res, upstream, ctype);
