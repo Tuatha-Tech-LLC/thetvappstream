@@ -63,16 +63,18 @@ async function fetchRendered(url, { referer, userAgent, timeoutMs = 25000 } = {}
 // Load a player URL and capture the first network request whose URL matches
 // `match`, along with the headers the browser sent for it (Referer/Origin/UA) —
 // exactly what a downstream fetch needs to pull a header-locked stream.
+// `frameMatch` limits capture to requests made by a frame whose URL matches it;
+// needed when the loaded page is an ad-heavy host page and the player is an iframe.
 async function sniffStream(
   url,
-  { referer, userAgent, timeoutMs = 30000, match = /\.m3u8(\?|$)/i } = {},
+  { referer, userAgent, timeoutMs = 30000, match = /\.m3u8(\?|$)/i, frameMatch = null } = {},
 ) {
   return withPage(
     async page => {
       let captured = null;
       const seen = new Promise(resolve => {
         page.on('request', req => {
-          if (!captured && match.test(req.url())) {
+          if (!captured && match.test(req.url()) && fromFrame(req, frameMatch)) {
             const h = req.headers();
             captured = {
               url: req.url(),
@@ -91,6 +93,16 @@ async function sniffStream(
     },
     { userAgent },
   );
+}
+
+function fromFrame(req, frameMatch) {
+  if (!frameMatch) return true;
+  try {
+    return frameMatch.test(req.frame().url());
+  } catch {
+    // Service-worker requests have no frame.
+    return false;
+  }
 }
 
 function pickHeaders(h) {

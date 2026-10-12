@@ -75,7 +75,9 @@ async function resolveDaddyStream(base, id, deps = {}) {
   if (!embed) throw new Error(`daddylive: no daddy embed for id=${id}`);
 
   const embedOrigin = new URL(embed).origin;
-  const result = await sniff(embed, { referer: `${base}/` });
+  // The player 403s ("only works when embedded") when opened top-level, so load
+  // the stream page that embeds it and take the manifest the player frame requests.
+  const result = await sniff(streamUrl, { referer: `${base}/`, frameMatch: EMBED_RE });
   if (!result || !result.url) throw new Error(`daddylive: no manifest for id=${id}`);
 
   return { url: result.url, headers: streamHeaders(result.headers || {}, embedOrigin) };
