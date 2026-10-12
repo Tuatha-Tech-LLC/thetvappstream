@@ -94,6 +94,7 @@ async function collect(stream, first, maxBytes = Infinity) {
 
 const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
 const MAX_SEGMENT_BYTES = 64 * 1024 * 1024;
+const WHOLE_BODY_RANGE_RE = /^\s*bytes\s*=\s*0\s*-\s*$/i;
 const PEEK_TIMEOUT_MS = 15000;
 
 // Probe a stream URL with the headers it needs and classify it:
@@ -184,7 +185,10 @@ function createHlsHandlers({ lookupHeaders, baseUrlFor, http = axios }) {
       return;
     }
     const reqHeaders = { ...headers };
-    if (req.headers && req.headers.range) {
+    // ffmpeg sends "Range: bytes=0-" on every segment. That is the whole body,
+    // and forwarding it turns the upstream 200 into a 206, which would skip the
+    // pixel-segment unwrap below.
+    if (req.headers && req.headers.range && !WHOLE_BODY_RANGE_RE.test(req.headers.range)) {
       reqHeaders.Range = req.headers.range;
       // Byte ranges only line up with what we relay if the body isn't re-encoded.
       reqHeaders['Accept-Encoding'] = 'identity';

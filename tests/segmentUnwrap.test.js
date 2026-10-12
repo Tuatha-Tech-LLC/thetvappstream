@@ -70,3 +70,36 @@ test('segment serves an image/png pixel-packed segment as video/mp2t', async () 
   assert.deepStrictEqual(await done, TS);
   assert.strictEqual(res.headers['content-type'], 'video/mp2t');
 });
+
+test('segment unwraps when the client sends ffmpeg\'s whole-body "Range: bytes=0-"', async () => {
+  const png = await pixelPng(TS);
+  let sent;
+  const hls = createHlsHandlers({
+    lookupHeaders: () => ({ Referer: 'https://embed/' }),
+    baseUrlFor: () => 'http://proxy',
+    http: {
+      get: async (_url, opts) => {
+        sent = opts.headers;
+        // The CDN answers any forwarded Range with a 206, which is not unwrapped.
+        return {
+          status: sent.Range ? 206 : 200,
+          headers: { 'content-type': 'image/png' },
+          data: Readable.from([png]),
+          request: {},
+        };
+      },
+    },
+  });
+  const res = fakeRes();
+  const done = res.body();
+  await hls.segment(
+    {
+      params: { streamId: 'evt-x' },
+      query: { u: 'https://cdn.x/obj~tplv.image' },
+      headers: { range: 'bytes=0-' },
+    },
+    res,
+  );
+  assert.deepStrictEqual(await done, TS);
+  assert.strictEqual(sent.Range, undefined);
+});
