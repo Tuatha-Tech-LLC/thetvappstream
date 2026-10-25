@@ -61,6 +61,11 @@ class Aggregator {
     // playlist), so without this each poll re-ran the full resolve — for
     // DaddyLive that's a headless-browser session per request.
     this._resolved = new Map();
+    // publicId -> in-flight resolve promise. A tune fans out into several
+    // concurrent /channel requests (Plex retries, ffmpeg reconnects, the
+    // recorder), and each used to run its own resolve, a headless browser for
+    // DaddyLive, so a slow source piled up sessions until the box stalled.
+    this._inflight = new Map();
     this.streamCacheMs = STREAM_CACHE_MS;
     this.epgXml = null;
     this.epgLastRefresh = 0;
@@ -289,8 +294,25 @@ class Aggregator {
   // (e.g. the manifest body it already downloaded).
   //
   // A validated stream is cached per id; the cached URL is re-validated on use,
-  // so an expired token costs one failed check and a fresh resolve.
-  async resolveStream(publicId, { validate } = {}) {
+  // so an expired token costs one failed check and a fresh resolve. Each
+  // successful re-validation extends the entry, so a channel that is being
+  // played keeps its stream: the player reloads the playlist every few seconds,
+  // and a hard expiry made one of those reloads wait on a full resolve (tens of
+  // seconds for DaddyLive), which stalled playback long enough for Dispatcharr
+  // to drop the channel. The TTL now only ages out channels nobody is watching.
+  //
+  // Concurrent calls for the same id share one resolve, and its result.
+  resolveStream(publicId, opts = {}) {
+    const pending = this._inflight.get(publicId);
+    if (pending) return pending;
+    const p = this._resolveStream(publicId, opts).finally(() => {
+      this._inflight.delete(publicId);
+    });
+    this._inflight.set(publicId, p);
+    return p;
+  }
+
+  async _resolveStream(publicId, { validate } = {}) {
     const sources = this.streamIndex.get(publicId);
     if (!sources || sources.length === 0) throw new Error(`unknown stream id: ${publicId}`);
 
@@ -298,7 +320,10 @@ class Aggregator {
     if (cached && cached.expires > Date.now()) {
       if (!validate) return cached.stream;
       const check = await Promise.resolve(validate(cached.stream)).catch(() => null);
-      if (check) return { ...cached.stream, check };
+      if (check) {
+        cached.expires = Date.now() + this.streamCacheMs;
+        return { ...cached.stream, check };
+      }
       this._resolved.delete(publicId);
     }
 

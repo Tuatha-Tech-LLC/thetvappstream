@@ -36,14 +36,41 @@ async function getBrowser() {
   }
 }
 
+// Cap on concurrent headless pages. Each stream sniff is a full page load of an
+// ad-heavy site; when a source goes bad every tune and retry falls through to
+// one, and unbounded they exhaust the LXC's memory and starve the streams that
+// still work. Extra sessions queue.
+const MAX_PAGES = 2;
+let _activePages = 0;
+const _pageQueue = [];
+
+async function acquirePage() {
+  if (_activePages < MAX_PAGES) {
+    _activePages++;
+    return;
+  }
+  await new Promise(resolve => _pageQueue.push(resolve));
+}
+
+function releasePage() {
+  const next = _pageQueue.shift();
+  if (next) next();
+  else _activePages--;
+}
+
 async function withPage(fn, { userAgent = DEFAULT_UA } = {}) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({ userAgent });
-  const page = await context.newPage();
+  await acquirePage();
   try {
-    return await fn(page);
+    const browser = await getBrowser();
+    const context = await browser.newContext({ userAgent });
+    try {
+      const page = await context.newPage();
+      return await fn(page);
+    } finally {
+      await context.close().catch(() => {});
+    }
   } finally {
-    await context.close().catch(() => {});
+    releasePage();
   }
 }
 

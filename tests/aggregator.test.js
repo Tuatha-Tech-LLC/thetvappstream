@@ -386,6 +386,47 @@ test('a validated stream is cached and re-validated instead of re-resolved', asy
   assert.deepStrictEqual(p.resolved, ['101', '101']);
 });
 
+test('a stream that keeps validating outlives the cache TTL', async () => {
+  const p = new FakeProvider('thetvapp', { linear: { CNN: '101' } });
+  const agg = new Aggregator([p]);
+  agg.streamCacheMs = 50;
+  await agg.listM3uEntries();
+  const validate = () => ({ ok: true });
+
+  // Playlist reloads every 20ms for 3x the TTL: each one re-validates and
+  // extends the entry, so the provider is never asked again mid-play.
+  for (let i = 0; i < 8; i++) {
+    await agg.resolveStream('thetvapp:101', { validate });
+    await new Promise(r => setTimeout(r, 20));
+  }
+  assert.deepStrictEqual(p.resolved, ['101']);
+
+  // Left idle past the TTL, the next request resolves fresh.
+  await new Promise(r => setTimeout(r, 80));
+  await agg.resolveStream('thetvapp:101', { validate });
+  assert.deepStrictEqual(p.resolved, ['101', '101']);
+});
+
+test('concurrent requests for one channel share a single resolve', async () => {
+  const p = new FakeProvider('thetvapp', { linear: { CNN: '101' } });
+  const resolve = p.resolveStream.bind(p);
+  p.resolveStream = async ref => {
+    await new Promise(r => setTimeout(r, 20));
+    return resolve(ref);
+  };
+  const agg = new Aggregator([p]);
+  agg.streamCacheMs = 0;
+  await agg.listM3uEntries();
+
+  const out = await Promise.all([1, 2, 3].map(() => agg.resolveStream('thetvapp:101')));
+  assert.deepStrictEqual(p.resolved, ['101']);
+  assert.ok(out.every(o => o.url === 'http://stream/thetvapp/101'));
+
+  // Once it settles, the next request isn't handed the old promise.
+  await agg.resolveStream('thetvapp:101');
+  assert.deepStrictEqual(p.resolved, ['101', '101']);
+});
+
 test('quotes and newlines in source strings cannot break M3U rows', async () => {
   const p = new FakeProvider('thetvapp', {
     events: [
